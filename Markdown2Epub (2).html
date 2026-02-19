@@ -157,6 +157,7 @@ button:active { transform: scale(0.97); }
 .translate-row label { font-size:12px; color:var(--text2); width:80px; flex-shrink:0; }
 .translate-row select, .translate-row input[type="checkbox"] { background:var(--input-bg); color:var(--text); border:1px solid var(--input-border); border-radius:4px; padding:4px 8px; font-size:12px; outline:none; flex:1; }
 .translate-row select:focus { border-color:var(--accent); }
+.translate-hint { margin:-2px 0 10px; font-size:11px; color:var(--text2); line-height:1.35; }
 .translate-scope { font-size:12px; color:var(--text2); margin-bottom:14px; display:flex; gap:16px; }
 .translate-scope label { display:flex; align-items:center; gap:5px; cursor:pointer; }
 .translate-progress { display:none; margin-bottom:10px; }
@@ -1218,6 +1219,18 @@ document.addEventListener('DOMContentLoaded', () => { window._appInstance = new 
   <div class="translate-box">
     <h3>🌐 Traduction automatique</h3>
     <div class="translate-row">
+      <label>Traducteur</label>
+      <select id="tl-service">
+        <option value="google">GoogleTranslator (old API)</option>
+        <option value="google2">GoogleTranslator2 (RPC)</option>
+        <option value="bing">BingTranslator</option>
+        <option value="microsoft">MicrosoftTranslator</option>
+        <option value="yandex">YandexTranslator</option>
+        <option value="aggregate">AggregateTranslator</option>
+      </select>
+    </div>
+    <div class="translate-hint" id="tl-service-hint"></div>
+    <div class="translate-row">
       <label>Langue source</label>
       <select id="tl-src">
         <option value="auto">Détection auto</option>
@@ -1266,24 +1279,71 @@ document.addEventListener('DOMContentLoaded', () => { window._appInstance = new 
 <script>
 /* ════════════════════════════════════════════
    MODULE : TRADUCTION AUTOMATIQUE
-   Utilise l'API gratuite Google Translate
+   Traducteurs du projet GTranslate intégrés à l'UI
    ════════════════════════════════════════════ */
 
 const TranslateModule = (() => {
-  // ── Appel API Google Translate (un seul segment) ──
-  async function translateChunk(text, sl, tl) {
+  const SERVICE_INFO = {
+    google: {
+      label: 'GoogleTranslator',
+      hint: 'API Google Translate historique (translate_a/single) — disponible directement dans ce fichier HTML.'
+    },
+    google2: {
+      label: 'GoogleTranslator2',
+      hint: 'API RPC Google moderne. En mode navigateur local, elle est simulée via le même endpoint public Google.'
+    },
+    bing: {
+      label: 'BingTranslator',
+      hint: 'Nécessite les credentials Bing Web (token/key). Requiert un backend (ex. librairie C# GTranslate).'
+    },
+    microsoft: {
+      label: 'MicrosoftTranslator',
+      hint: 'Nécessite un token Azure Translator. Requiert un backend GTranslate pour signer les requêtes.'
+    },
+    yandex: {
+      label: 'YandexTranslator',
+      hint: 'Nécessite les endpoints Yandex (translate/detect/translit). Requiert un backend GTranslate.'
+    },
+    aggregate: {
+      label: 'AggregateTranslator',
+      hint: "Essaie plusieurs traducteurs dans l'ordre (Google, Google2, Microsoft, Yandex, Bing). Ici: fallback Google uniquement en front local."
+    }
+  };
+
+  function getServiceInfo(service) {
+    return SERVICE_INFO[service] || SERVICE_INFO.google;
+  }
+
+  async function translateWithGoogleSingle(text, sl, tl) {
     if (!text.trim()) return text;
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&q=${encodeURIComponent(text)}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Erreur réseau : ${res.status}`);
     const data = await res.json();
-    // Format : [[ ["traduit","original",...], ... ], null, "en", ...]
-    // On concatène tous les segments traduits
     if (!data || !data[0]) return text;
     return data[0].map(seg => seg[0] || '').join('');
   }
 
-  // ── Découpe le texte en morceaux ≤ maxLen caractères, sur les frontières de lignes ──
+  async function translateChunk(text, sl, tl, service) {
+    switch (service) {
+      case 'google':
+      case 'google2':
+        return translateWithGoogleSingle(text, sl, tl);
+      case 'aggregate':
+        try {
+          return await translateWithGoogleSingle(text, sl, tl);
+        } catch {
+          return translateWithGoogleSingle(text, sl, tl);
+        }
+      case 'bing':
+      case 'microsoft':
+      case 'yandex':
+        throw new Error(`${getServiceInfo(service).label} n'est pas appelable en pur front-end. Branche ce bouton à un backend utilisant GTranslate.`);
+      default:
+        return translateWithGoogleSingle(text, sl, tl);
+    }
+  }
+
   function splitIntoChunks(text, maxLen = 1800) {
     const lines = text.split('\n');
     const chunks = [];
@@ -1302,22 +1362,20 @@ const TranslateModule = (() => {
     return chunks;
   }
 
-  // ── Traduit un texte complet (multi-chunks) avec callback de progression ──
-  async function translateText(text, sl, tl, onProgress) {
+  async function translateText(text, sl, tl, service, onProgress) {
     const chunks = splitIntoChunks(text);
     const results = [];
     for (let i = 0; i < chunks.length; i++) {
       if (onProgress) onProgress(i, chunks.length);
-      const translated = await translateChunk(chunks[i], sl, tl);
+      const translated = await translateChunk(chunks[i], sl, tl, service);
       results.push(translated);
-      // Petite pause pour éviter le rate limiting
       if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 120));
     }
     if (onProgress) onProgress(chunks.length, chunks.length);
     return results.join('\n');
   }
 
-  return { translateText };
+  return { translateText, getServiceInfo };
 })();
 
 /* ── Intégration dans l'App ── */
@@ -1326,6 +1384,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnOpen = document.getElementById('btn-translate');
   const btnGo   = document.getElementById('btn-tl-go');
   const btnCancel = document.getElementById('btn-tl-cancel');
+  const selService = document.getElementById('tl-service');
+  const serviceHint = document.getElementById('tl-service-hint');
   const selSrc  = document.getElementById('tl-src');
   const selDst  = document.getElementById('tl-dst');
   const progress     = document.getElementById('tl-progress');
@@ -1334,26 +1394,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let abortFlag = false;
 
-  // Ouvre la modale
+  const refreshServiceHint = () => {
+    const info = TranslateModule.getServiceInfo(selService.value);
+    serviceHint.textContent = `${info.label} — ${info.hint}`;
+  };
+
+  selService.addEventListener('change', refreshServiceHint);
+  refreshServiceHint();
+
   btnOpen.addEventListener('click', () => {
-    // Pré-sélectionne la langue du livre comme cible
     const bookLang = document.getElementById('book-lang').value;
     if (bookLang) selDst.value = bookLang;
+    refreshServiceHint();
     progress.classList.remove('visible');
     btnGo.disabled = false;
     btnGo.textContent = 'Traduire';
     modal.classList.add('visible');
   });
 
-  // Ferme la modale
   btnCancel.addEventListener('click', () => {
     abortFlag = true;
     modal.classList.remove('visible');
   });
   modal.addEventListener('click', e => { if (e.target === modal) { abortFlag = true; modal.classList.remove('visible'); } });
 
-  // Lance la traduction
   btnGo.addEventListener('click', async () => {
+    const service = selService.value;
     const sl    = selSrc.value;
     const tl    = selDst.value;
     const scope = document.querySelector('input[name="tl-scope"]:checked').value;
@@ -1363,7 +1429,6 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Récupère l'instance App (créée au DOMContentLoaded principal)
     const app = window._appInstance;
     if (!app) return;
 
@@ -1387,7 +1452,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (scope === 'current') {
         const ch = app.state.chapters[app.state.currentIndex];
         progressText.textContent = `Traduction de « ${ch.title} »…`;
-        const translated = await TranslateModule.translateText(ch.content, sl, tl,
+        const translated = await TranslateModule.translateText(ch.content, sl, tl, service,
           (done, total) => showProgress(done, total, 0, 1));
         if (abortFlag) return;
         ch.content = translated;
@@ -1401,11 +1466,10 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let i = 0; i < chapters.length; i++) {
           if (abortFlag) { app.showToast('Traduction interrompue.', 'info'); break; }
           progressText.textContent = `Chapitre ${i+1}/${chapters.length} : « ${chapters[i].title} »`;
-          chapters[i].content = await TranslateModule.translateText(chapters[i].content, sl, tl,
+          chapters[i].content = await TranslateModule.translateText(chapters[i].content, sl, tl, service,
             (done, total) => showProgress(done, total, i, chapters.length));
         }
         if (!abortFlag) {
-          // Recharge le chapitre courant dans l'éditeur
           app.dom.editor.value = app.state.chapters[app.state.currentIndex].content;
           app.updatePreview();
           app.scheduleSave();
